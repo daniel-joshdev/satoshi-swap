@@ -107,3 +107,105 @@
 (define-private (is-pool-valid (pool-id uint))
   (< pool-id (var-get next-pool-id))
 )
+
+(define-private (calculate-lp-shares
+    (amount-a uint)
+    (amount-b uint)
+    (reserve-a uint)
+    (reserve-b uint)
+    (total-shares uint)
+  )
+  (if (is-eq total-shares u0)
+    MINIMUM-LIQUIDITY
+    (get-minimum (/ (* amount-a total-shares) reserve-a)
+      (/ (* amount-b total-shares) reserve-b)
+    )
+  )
+)
+
+(define-private (validate-price-impact
+    (input-amount uint)
+    (input-reserve uint)
+  )
+  (<= (/ (* input-amount PRECISION-MULTIPLIER) input-reserve)
+    MAX-PRICE-IMPACT-BASIS-POINTS
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-pool-info (pool-id uint))
+  (match (map-get? liquidity-pools { pool-id: pool-id })
+    pool-data (ok pool-data)
+    ERR-POOL-NOT-FOUND
+  )
+)
+
+(define-read-only (get-lp-position
+    (pool-id uint)
+    (provider principal)
+  )
+  (match (map-get? lp-positions {
+    pool-id: pool-id,
+    provider: provider,
+  })
+    position (ok position)
+    ERR-UNAUTHORIZED
+  )
+)
+
+(define-read-only (calculate-swap-result
+    (pool-id uint)
+    (input-amount uint)
+    (token-a-to-b bool)
+  )
+  (match (map-get? liquidity-pools { pool-id: pool-id })
+    pool (let (
+        (input-reserve (if token-a-to-b
+          (get reserve-a pool)
+          (get reserve-b pool)
+        ))
+        (output-reserve (if token-a-to-b
+          (get reserve-b pool)
+          (get reserve-a pool)
+        ))
+        (fee-adjusted-input (- PRECISION-MULTIPLIER (get trading-fee pool)))
+      )
+      (ok {
+        output-amount: (/ (* input-amount output-reserve fee-adjusted-input)
+          (+ (* input-reserve PRECISION-MULTIPLIER)
+            (* input-amount fee-adjusted-input)
+          )),
+        trading-fee: (/ (* input-amount (get trading-fee pool)) PRECISION-MULTIPLIER),
+      })
+    )
+    ERR-POOL-NOT-FOUND
+  )
+)
+
+(define-read-only (get-protocol-stats)
+  (ok {
+    total-pools: (var-get next-pool-id),
+    treasury-balance: (var-get protocol-treasury),
+    global-fee-rate: (var-get global-trading-fee),
+  })
+)
+
+;; CORE PROTOCOL FUNCTIONS
+
+(define-public (initialize-pool
+    (token-a <sip-010-trait>)
+    (token-b <sip-010-trait>)
+    (initial-a uint)
+    (initial-b uint)
+  )
+  (let (
+      (pool-id (var-get next-pool-id))
+      (token-a-address (contract-of token-a))
+      (token-b-address (contract-of token-b))
+    )
+    ;; Validation checks
+    (asserts! (not (is-eq token-a-address token-b-address))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (and (> initial-a u0) (> initial-b u0)) ERR-ZERO-LIQUIDITY)
