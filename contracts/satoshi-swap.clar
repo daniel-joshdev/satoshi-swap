@@ -309,3 +309,106 @@
     (ok shares-minted)
   )
 )
+
+(define-public (withdraw-liquidity
+    (pool-id uint)
+    (token-a <sip-010-trait>)
+    (token-b <sip-010-trait>)
+    (shares uint)
+    (min-a uint)
+    (min-b uint)
+  )
+  (let (
+      (pool (unwrap! (map-get? liquidity-pools { pool-id: pool-id }) ERR-POOL-NOT-FOUND))
+      (lp-position (unwrap!
+        (map-get? lp-positions {
+          pool-id: pool-id,
+          provider: tx-sender,
+        })
+        ERR-UNAUTHORIZED
+      ))
+      (withdrawal-a (/ (* shares (get reserve-a pool)) (get total-liquidity-shares pool)))
+      (withdrawal-b (/ (* shares (get reserve-b pool)) (get total-liquidity-shares pool)))
+    )
+    ;; Validation
+    (asserts! (is-pool-valid pool-id) ERR-INVALID-POOL-ID)
+    (asserts! (is-eq (contract-of token-a) (get token-a pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (is-eq (contract-of token-b) (get token-b pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (<= shares (get shares lp-position)) ERR-INSUFFICIENT-BALANCE)
+    (asserts! (and (>= withdrawal-a min-a) (>= withdrawal-b min-b))
+      ERR-MINIMUM-OUTPUT-NOT-MET
+    )
+
+    ;; Transfer tokens back to LP
+    (try! (as-contract (contract-call? token-a transfer withdrawal-a tx-sender tx-sender none)))
+    (try! (as-contract (contract-call? token-b transfer withdrawal-b tx-sender tx-sender none)))
+
+    ;; Update pool state
+    (map-set liquidity-pools { pool-id: pool-id }
+      (merge pool {
+        reserve-a: (- (get reserve-a pool) withdrawal-a),
+        reserve-b: (- (get reserve-b pool) withdrawal-b),
+        total-liquidity-shares: (- (get total-liquidity-shares pool) shares),
+        last-update-block: stacks-block-height,
+      })
+    )
+
+    ;; Update LP position
+    (map-set lp-positions {
+      pool-id: pool-id,
+      provider: tx-sender,
+    }
+      (merge lp-position { shares: (- (get shares lp-position) shares) })
+    )
+
+    (ok {
+      amount-a: withdrawal-a,
+      amount-b: withdrawal-b,
+    })
+  )
+)
+
+(define-public (execute-swap-a-to-b
+    (pool-id uint)
+    (token-a <sip-010-trait>)
+    (token-b <sip-010-trait>)
+    (amount-a uint)
+    (min-amount-b uint)
+  )
+  (let (
+      (pool (unwrap! (map-get? liquidity-pools { pool-id: pool-id }) ERR-POOL-NOT-FOUND))
+      (swap-result (unwrap! (calculate-swap-result pool-id amount-a true) ERR-POOL-NOT-FOUND))
+      (output-amount (get output-amount swap-result))
+      (fee-collected (get trading-fee swap-result))
+    )
+    ;; Validation
+    (asserts! (is-pool-valid pool-id) ERR-INVALID-POOL-ID)
+    (asserts! (is-eq (contract-of token-a) (get token-a pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (is-eq (contract-of token-b) (get token-b pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (>= output-amount min-amount-b) ERR-SLIPPAGE-EXCEEDED)
+    (asserts! (validate-price-impact amount-a (get reserve-a pool))
+      ERR-EXCESSIVE-PRICE-IMPACT
+    )
+
+    ;; Execute token transfers
+    (try! (contract-call? token-a transfer amount-a tx-sender (as-contract tx-sender)
+      none
+    ))
+    (try! (as-contract (contract-call? token-b transfer output-amount tx-sender tx-sender none)))
+
+    ;; Update pool reserves
+    (map-set liquidity-pools { pool-id: pool-id }
+      (merge pool {
+        reserve-a: (+ (get reserve-a pool) amount-a),
+        reserve-b: (- (get reserve-b pool) output-amount),
+        last-update-block: stacks-block-height,
+      })
+    )
