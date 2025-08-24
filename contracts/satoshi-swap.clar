@@ -412,3 +412,68 @@
         last-update-block: stacks-block-height,
       })
     )
+
+    ;; Update protocol treasury
+    (var-set protocol-treasury (+ (var-get protocol-treasury) fee-collected))
+
+    (ok output-amount)
+  )
+)
+
+(define-public (execute-swap-b-to-a
+    (pool-id uint)
+    (token-a <sip-010-trait>)
+    (token-b <sip-010-trait>)
+    (amount-b uint)
+    (min-amount-a uint)
+  )
+  (let (
+      (pool (unwrap! (map-get? liquidity-pools { pool-id: pool-id }) ERR-POOL-NOT-FOUND))
+      (swap-result (unwrap! (calculate-swap-result pool-id amount-b false) ERR-POOL-NOT-FOUND))
+      (output-amount (get output-amount swap-result))
+      (fee-collected (get trading-fee swap-result))
+    )
+    ;; Validation
+    (asserts! (is-pool-valid pool-id) ERR-INVALID-POOL-ID)
+    (asserts! (is-eq (contract-of token-a) (get token-a pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (is-eq (contract-of token-b) (get token-b pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (>= output-amount min-amount-a) ERR-SLIPPAGE-EXCEEDED)
+    (asserts! (validate-price-impact amount-b (get reserve-b pool))
+      ERR-EXCESSIVE-PRICE-IMPACT
+    )
+
+    ;; Execute token transfers
+    (try! (contract-call? token-b transfer amount-b tx-sender (as-contract tx-sender)
+      none
+    ))
+    (try! (as-contract (contract-call? token-a transfer output-amount tx-sender tx-sender none)))
+
+    ;; Update pool reserves
+    (map-set liquidity-pools { pool-id: pool-id }
+      (merge pool {
+        reserve-a: (- (get reserve-a pool) output-amount),
+        reserve-b: (+ (get reserve-b pool) amount-b),
+        last-update-block: stacks-block-height,
+      })
+    )
+
+    ;; Update protocol treasury
+    (var-set protocol-treasury (+ (var-get protocol-treasury) fee-collected))
+
+    (ok output-amount)
+  )
+)
+
+;; PROTOCOL ADMINISTRATION
+
+(define-public (update-global-fee (new-fee-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (<= new-fee-rate u100) ERR-INVALID-TOKEN-PAIR) ;; Max 1.00% fee
+    (ok (var-set global-trading-fee new-fee-rate))
+  )
+)
