@@ -209,3 +209,103 @@
       ERR-INVALID-TOKEN-PAIR
     )
     (asserts! (and (> initial-a u0) (> initial-b u0)) ERR-ZERO-LIQUIDITY)
+
+    ;; Transfer initial liquidity to contract
+    (try! (contract-call? token-a transfer initial-a tx-sender (as-contract tx-sender)
+      none
+    ))
+    (try! (contract-call? token-b transfer initial-b tx-sender (as-contract tx-sender)
+      none
+    ))
+
+    ;; Create new pool
+    (map-set liquidity-pools { pool-id: pool-id } {
+      token-a: token-a-address,
+      token-b: token-b-address,
+      reserve-a: initial-a,
+      reserve-b: initial-b,
+      total-liquidity-shares: MINIMUM-LIQUIDITY,
+      trading-fee: DEFAULT-TRADING-FEE,
+      last-update-block: stacks-block-height,
+    })
+
+    ;; Assign initial LP position
+    (map-set lp-positions {
+      pool-id: pool-id,
+      provider: tx-sender,
+    } {
+      shares: MINIMUM-LIQUIDITY,
+      entry-block: stacks-block-height,
+    })
+
+    ;; Increment pool counter
+    (var-set next-pool-id (+ pool-id u1))
+    (ok pool-id)
+  )
+)
+
+(define-public (provide-liquidity
+    (pool-id uint)
+    (token-a <sip-010-trait>)
+    (token-b <sip-010-trait>)
+    (amount-a uint)
+    (amount-b uint)
+    (min-shares uint)
+  )
+  (let (
+      (pool (unwrap! (map-get? liquidity-pools { pool-id: pool-id }) ERR-POOL-NOT-FOUND))
+      (shares-minted (calculate-lp-shares amount-a amount-b (get reserve-a pool)
+        (get reserve-b pool) (get total-liquidity-shares pool)
+      ))
+    )
+    ;; Validation
+    (asserts! (is-pool-valid pool-id) ERR-INVALID-POOL-ID)
+    (asserts! (is-eq (contract-of token-a) (get token-a pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (is-eq (contract-of token-b) (get token-b pool))
+      ERR-INVALID-TOKEN-PAIR
+    )
+    (asserts! (>= shares-minted min-shares) ERR-MINIMUM-OUTPUT-NOT-MET)
+
+    ;; Transfer tokens to contract
+    (try! (contract-call? token-a transfer amount-a tx-sender (as-contract tx-sender)
+      none
+    ))
+    (try! (contract-call? token-b transfer amount-b tx-sender (as-contract tx-sender)
+      none
+    ))
+
+    ;; Update pool reserves
+    (map-set liquidity-pools { pool-id: pool-id }
+      (merge pool {
+        reserve-a: (+ (get reserve-a pool) amount-a),
+        reserve-b: (+ (get reserve-b pool) amount-b),
+        total-liquidity-shares: (+ (get total-liquidity-shares pool) shares-minted),
+        last-update-block: stacks-block-height,
+      })
+    )
+
+    ;; Update LP position
+    (match (map-get? lp-positions {
+      pool-id: pool-id,
+      provider: tx-sender,
+    })
+      existing-position (map-set lp-positions {
+        pool-id: pool-id,
+        provider: tx-sender,
+      }
+        (merge existing-position { shares: (+ (get shares existing-position) shares-minted) })
+      )
+      (map-set lp-positions {
+        pool-id: pool-id,
+        provider: tx-sender,
+      } {
+        shares: shares-minted,
+        entry-block: stacks-block-height,
+      })
+    )
+
+    (ok shares-minted)
+  )
+)
